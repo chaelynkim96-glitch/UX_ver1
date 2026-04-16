@@ -181,6 +181,88 @@ def load_sample_data():
     return prepare_dataframe(pd.DataFrame(rows))
 
 
+def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    working = df.copy()
+    defaults = {
+        "id": "", "event_name": "", "event_type": "기타", "host_brand": "", "venue_name": "",
+        "region": "기타", "start_date": "", "end_date": "", "status": "", "source_link": "",
+        "ai_summary": "", "keywords": "", "target_estimate": "전체", "importance": "중",
+        "benchmark_value": "중", "lotte_idea": "", "one_line_summary": "", "visual_feature": "",
+        "experience_element": "", "buzz_basis": "", "internal_similarity": "", "internal_performance": "",
+        "address": "", "main_content": "",
+    }
+    for col, default in defaults.items():
+        if col not in working.columns:
+            working[col] = default
+
+    working["start_date"] = working["start_date"].apply(to_date)
+    working["end_date"] = working["end_date"].apply(to_date)
+    working["status"] = working.apply(
+        lambda row: infer_status(row["start_date"], row["end_date"])
+        if text_or_default(row["status"], "") == ""
+        else text_or_default(row["status"]),
+        axis=1,
+    )
+
+    text_cols = ["id", "event_name", "event_type", "host_brand", "venue_name", "region", "status", "source_link", "ai_summary", "keywords", "target_estimate", "importance", "benchmark_value", "lotte_idea", "one_line_summary", "visual_feature", "experience_element", "buzz_basis", "internal_similarity", "internal_performance", "address", "main_content"]
+    for col in text_cols:
+        working[col] = working[col].apply(lambda x: text_or_default(x, ""))
+
+    working["importance_score"] = working["importance"].apply(safe_score)
+    working["benchmark_score"] = working["benchmark_value"].apply(safe_score)
+    working["sort_start"] = working["start_date"].apply(lambda x: x or date.max)
+    working["sort_end"] = working["end_date"].apply(lambda x: x or date.max)
+    return working
+
+
+def filter_dataframe(df, view_type, selected_date, selected_types, selected_targets, keyword):
+    filtered = df.copy()
+    filtered["start_date"] = filtered["start_date"].apply(to_date)
+    filtered["end_date"] = filtered["end_date"].apply(to_date)
+
+    if selected_types:
+        filtered = filtered[filtered["event_type"].isin(selected_types)]
+    if selected_targets:
+        filtered = filtered[filtered["target_estimate"].apply(lambda x: contains_target(x, selected_targets))]
+    if keyword.strip():
+        kw = keyword.strip().lower()
+        search_cols = ["event_name", "ai_summary", "keywords", "lotte_idea", "main_content"]
+        mask = False
+        for col in search_cols:
+            mask = mask | filtered[col].str.lower().str.contains(kw, na=False)
+        filtered = filtered[mask]
+
+    if view_type == "월":
+        month_start = selected_date.replace(day=1)
+        month_end = date(selected_date.year, selected_date.month, calendar.monthrange(selected_date.year, selected_date.month)[1])
+        filtered = filtered[(filtered["start_date"] <= month_end) & (filtered["end_date"] >= month_start)]
+    elif view_type == "주":
+        week_start = selected_date - timedelta(days=selected_date.weekday())
+        week_end = week_start + timedelta(days=6)
+        filtered = filtered[(filtered["start_date"] <= week_end) & (filtered["end_date"] >= week_start)]
+
+    return filtered.sort_values(["importance_score", "benchmark_score", "sort_start"], ascending=[False, False, True])
+
+
+def build_insights(df, selected_date):
+    if df.empty:
+        return {"summary_lines": ["조건에 맞는 데이터가 없습니다."], "keywords": []}
+    type_counts = df["event_type"].value_counts()
+    experiential_keywords = ["체험", "포토", "굿즈", "인증", "몰입", "클래스"]
+    experiential_count = df["ai_summary"].str.contains("|".join(experiential_keywords), case=False, na=False).sum()
+    sample_targets = split_multi(df.iloc[0]["target_estimate"])[:2] if not df.empty else []
+    summary_lines = [
+        f"{selected_date.month}월 기준 가장 활발한 유형은 '{type_counts.index[0]}'입니다.",
+        f"체험형 요소가 언급된 행사는 총 {experiential_count}건입니다.",
+        f"타겟 기반으로 이벤트 흐름을 비교하면 {', '.join(sample_targets) if sample_targets else '복합'} 계열 수요가 두드러집니다.",
+    ]
+    keyword_pool = []
+    for val in df["keywords"].tolist():
+        keyword_pool.extend([x.strip() for x in str(val).split(",") if x.strip()])
+    top_keywords = pd.Series(keyword_pool).value_counts().head(6).index.tolist() if keyword_pool else []
+    return {"summary_lines": summary_lines, "keywords": top_keywords}
+
+
 def render_upload_download():
     st.markdown("#### CSV 업로드")
     c1, c2 = st.columns(2)
