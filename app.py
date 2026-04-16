@@ -28,6 +28,33 @@ TYPE_STYLES = {
 IMPORTANCE_SCORE = {"상": 3, "중": 2, "하": 1}
 
 
+def inject_css():
+    st.markdown(
+        """
+        <style>
+        .stApp { background: #F7F7FA; }
+        .block-container { max-width: 1640px; padding-top: 5.5rem; padding-bottom: 1rem; }
+        .top-title { font-size: 30px; font-weight: 800; color: #111827; margin: 0; }
+        .sub-muted { color: #6B7280; font-size: 13px; }
+        .mini-card { background: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 14px; padding: 16px; height: 100%; }
+        .panel-card { background: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 16px; padding: 18px; }
+        .pill { display: inline-block; padding: 6px 11px; border-radius: 999px; font-size: 12px; font-weight: 700; margin-right: 8px; margin-bottom: 8px; background: #F3F0FF; color: #6D4CDB; }
+        .calendar-header { text-align: center; font-weight: 800; padding: 6px 0 8px 0; font-size: 17px; }
+        .event-card { border-radius: 9px; padding: 6px 7px; margin-bottom: 5px; line-height: 1.2; }
+        .event-type { font-size: 10px; font-weight: 800; margin-bottom: 2px; }
+        .event-title { font-size: 11px; font-weight: 700; color: #111827; margin-bottom: 0; }
+        .detail-label { font-size: 12px; font-weight: 800; color: #6B7280; margin-bottom: 4px; }
+        .detail-value { font-size: 14px; color: #111827; line-height: 1.5; margin-bottom: 12px; }
+        div[data-testid="stVerticalBlockBorderWrapper"] { background: #FFFFFF; }
+        div[data-testid="stButton"] > button { border-radius: 10px; }
+        [data-testid="stSidebar"] .stDownloadButton button { height: 38px; }
+        [data-testid="stSidebar"] .stFileUploader { margin-bottom: 0; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def seoul_today() -> date:
     return datetime.now(SEOUL_TZ).date()
 
@@ -343,6 +370,20 @@ def render_month_calendar(df, selected_date):
                         st.markdown("<div style='height:0.15rem;'></div>", unsafe_allow_html=True)
 
                     st.markdown("</div>", unsafe_allow_html=True)
+
+    legend = st.columns(6)
+    for idx, label in enumerate(EVENT_CATEGORIES):
+        with legend[idx]:
+            style = get_type_style(label)
+            st.markdown(
+                f"""
+                <div style="text-align:center; font-size:12px; color:#374151; margin-top:6px;">
+                    <span style="display:inline-block; width:9px; height:9px; border-radius:999px; background:{style['dot']}; margin-right:5px;"></span>
+                    {label}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
 
 def render_week_view(df, selected_date):
