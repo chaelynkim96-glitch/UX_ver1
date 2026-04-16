@@ -155,390 +155,112 @@ def load_sample_data():
     return prepare_dataframe(pd.DataFrame(rows))
 
 
-def render_upload_download():
-    st.markdown("#### CSV 업로드")
-    c1, c2 = st.columns(2)
-    with c1:
-        uploaded_file = st.file_uploader("CSV 파일", type=["csv"], label_visibility="collapsed")
-    with c2:
-        st.download_button(
-            "Download",
-            data=csv_template_bytes(),
-            file_name="event_calendar_template.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-    return uploaded_file
+def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    working = df.copy()
+    defaults = {
+        "id": "", "event_name": "", "event_type": "기타", "host_brand": "", "venue_name": "",
+        "region": "기타", "start_date": "", "end_date": "", "status": "", "source_link": "",
+        "ai_summary": "", "keywords": "", "target_estimate": "전체", "importance": "중",
+        "benchmark_value": "중", "lotte_idea": "", "one_line_summary": "", "visual_feature": "",
+        "experience_element": "", "buzz_basis": "", "internal_similarity": "", "internal_performance": "",
+        "address": "", "main_content": "",
+    }
+    for col, default in defaults.items():
+        if col not in working.columns:
+            working[col] = default
+
+    working["start_date"] = working["start_date"].apply(to_date)
+    working["end_date"] = working["end_date"].apply(to_date)
+    working["status"] = working.apply(
+        lambda row: infer_status(row["start_date"], row["end_date"])
+        if text_or_default(row["status"], "") == ""
+        else text_or_default(row["status"]),
+        axis=1,
+    )
+
+    text_cols = ["id", "event_name", "event_type", "host_brand", "venue_name", "region", "status", "source_link", "ai_summary", "keywords", "target_estimate", "importance", "benchmark_value", "lotte_idea", "one_line_summary", "visual_feature", "experience_element", "buzz_basis", "internal_similarity", "internal_performance", "address", "main_content"]
+    for col in text_cols:
+        working[col] = working[col].apply(lambda x: text_or_default(x, ""))
+
+    working["importance_score"] = working["importance"].apply(safe_score)
+    working["benchmark_score"] = working["benchmark_value"].apply(safe_score)
+    working["sort_start"] = working["start_date"].apply(lambda x: x or date.max)
+    working["sort_end"] = working["end_date"].apply(lambda x: x or date.max)
+    return working
 
 
-def render_sidebar(df):
-    with st.sidebar:
-        st.markdown("## 이벤트 트렌드 캘린더")
-        st.caption("AI 기반 이벤트·전시·팝업 트렌드 분석")
+def filter_dataframe(df, view_type, selected_date, selected_types, selected_targets, keyword):
+    filtered = df.copy()
+    filtered["start_date"] = filtered["start_date"].apply(to_date)
+    filtered["end_date"] = filtered["end_date"].apply(to_date)
 
-        uploaded_file = render_upload_download()
-        uploaded_df = None
-        if uploaded_file is not None:
-            try:
-                uploaded_df = pd.read_csv(uploaded_file, encoding="utf-8-sig")
-            except Exception:
-                uploaded_file.seek(0)
-                uploaded_df = pd.read_csv(uploaded_file, encoding="cp949")
-            st.success(f"업로드 완료: {len(uploaded_df)}건")
+    if selected_types:
+        filtered = filtered[filtered["event_type"].isin(selected_types)]
+    if selected_targets:
+        filtered = filtered[filtered["target_estimate"].apply(lambda x: contains_target(x, selected_targets))]
+    if keyword.strip():
+        kw = keyword.strip().lower()
+        search_cols = ["event_name", "ai_summary", "keywords", "lotte_idea", "main_content"]
+        mask = False
+        for col in search_cols:
+            mask = mask | filtered[col].str.lower().str.contains(kw, na=False)
+        filtered = filtered[mask]
 
-        st.markdown("---")
-        st.markdown("### 필터")
-        st.markdown("#### 이벤트 성격")
+    if view_type == "월":
+        month_start = selected_date.replace(day=1)
+        month_end = date(selected_date.year, selected_date.month, calendar.monthrange(selected_date.year, selected_date.month)[1])
+        filtered = filtered[(filtered["start_date"] <= month_end) & (filtered["end_date"] >= month_start)]
+    elif view_type == "주":
+        week_start = selected_date - timedelta(days=selected_date.weekday())
+        week_end = week_start + timedelta(days=6)
+        filtered = filtered[(filtered["start_date"] <= week_end) & (filtered["end_date"] >= week_start)]
 
-        selected_types = []
-        for t in EVENT_CATEGORIES:
-            checked = st.checkbox(t, value=(t != "기타"), key=f"type_{t}")
-            if checked:
-                selected_types.append(t)
-
-        st.markdown("#### 타겟")
-        selected_targets = []
-        for t in TARGET_OPTIONS:
-            checked = st.checkbox(t, value=False, key=f"target_{t}")
-            if checked:
-                selected_targets.append(t)
-
-        keyword = st.text_input("검색", placeholder="행사명, 키워드")
-        return selected_types, selected_targets, keyword, uploaded_df
+    return filtered.sort_values(["importance_score", "benchmark_score", "sort_start"], ascending=[False, False, True])
 
 
-def render_top_controls():
-    selected_date = st.session_state["selected_date"]
-    view_type = st.session_state["view_type"]
-
-    c1, c2, c3, c4, c5 = st.columns([0.7, 2.2, 2.0, 1.1, 1.1])
-    prev_month = (selected_date.replace(day=1) - timedelta(days=1)).replace(day=1)
-    next_month = (selected_date.replace(day=28) + timedelta(days=4)).replace(day=1)
-
-    with c1:
-        if st.button("‹", use_container_width=True):
-            st.session_state["selected_date"] = prev_month
-            if (
-                st.session_state["selected_day"].month != prev_month.month
-                or st.session_state["selected_day"].year != prev_month.year
-            ):
-                st.session_state["selected_day"] = prev_month
-            st.rerun()
-
-    with c2:
-        st.markdown(f'<div class="top-title">{selected_date.year}년 {selected_date.month}월</div>', unsafe_allow_html=True)
-
-    with c3:
-        current_index = ["월", "주", "리스트"].index(view_type)
-        selected_view = st.radio("보기", ["월", "주", "리스트"], index=current_index, horizontal=True, label_visibility="collapsed")
-        st.session_state["view_type"] = selected_view
-
-    with c4:
-        if st.button("오늘", use_container_width=True):
-            today = seoul_today()
-            st.session_state["selected_date"] = today.replace(day=1)
-            st.session_state["selected_day"] = today
-            st.rerun()
-
-    with c5:
-        if st.button("›", use_container_width=True):
-            st.session_state["selected_date"] = next_month
-            if (
-                st.session_state["selected_day"].month != next_month.month
-                or st.session_state["selected_day"].year != next_month.year
-            ):
-                st.session_state["selected_day"] = next_month
-            st.rerun()
-
-    picked = st.date_input("선택 날짜", value=st.session_state["selected_day"])
-    st.session_state["selected_day"] = picked
+def build_insights(df, selected_date):
+    if df.empty:
+        return {"summary_lines": ["조건에 맞는 데이터가 없습니다."], "keywords": []}
+    type_counts = df["event_type"].value_counts()
+    experiential_keywords = ["체험", "포토", "굿즈", "인증", "몰입", "클래스"]
+    experiential_count = df["ai_summary"].str.contains("|".join(experiential_keywords), case=False, na=False).sum()
+    summary_lines = [
+        f"{selected_date.month}월 기준 가장 활발한 유형은 '{type_counts.index[0]}'입니다.",
+        f"체험형 요소가 언급된 행사는 총 {experiential_count}건입니다.",
+        f"타겟 기반으로 이벤트 흐름을 비교하면 {', '.join(split_multi(df.iloc[0]['target_estimate'])[:2])} 계열 수요가 두드러집니다.",
+    ]
+    keyword_pool = []
+    for val in df["keywords"].tolist():
+        keyword_pool.extend([x.strip() for x in str(val).split(",") if x.strip()])
+    top_keywords = pd.Series(keyword_pool).value_counts().head(6).index.tolist() if keyword_pool else []
+    return {"summary_lines": summary_lines, "keywords": top_keywords}
 
 
-def render_event_badge(row):
-    style = get_type_style(row["event_type"])
+def inject_css():
     st.markdown(
-        f"""
-        <div class="event-card" style="background:{style['bg']};">
-            <div class="event-type" style="color:{style['text']};">{row['event_type']}</div>
-            <div class="event-title">{row['event_name']}</div>
-        </div>
+        """
+        <style>
+        .stApp { background: #F7F7FA; }
+        .block-container { max-width: 1640px; padding-top: 5.5rem; padding-bottom: 1rem; }
+        .top-title { font-size: 30px; font-weight: 800; color: #111827; margin: 0; }
+        .sub-muted { color: #6B7280; font-size: 13px; }
+        .mini-card { background: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 14px; padding: 16px; height: 100%; }
+        .panel-card { background: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 16px; padding: 18px; }
+        .pill { display: inline-block; padding: 6px 11px; border-radius: 999px; font-size: 12px; font-weight: 700; margin-right: 8px; margin-bottom: 8px; background: #F3F0FF; color: #6D4CDB; }
+        .calendar-header { text-align: center; font-weight: 800; padding: 6px 0 8px 0; font-size: 17px; }
+        .event-card { border-radius: 9px; padding: 6px 7px; margin-bottom: 5px; line-height: 1.2; }
+        .event-type { font-size: 10px; font-weight: 800; margin-bottom: 2px; }
+        .event-title { font-size: 11px; font-weight: 700; color: #111827; margin-bottom: 0; }
+        .detail-label { font-size: 12px; font-weight: 800; color: #6B7280; margin-bottom: 4px; }
+        .detail-value { font-size: 14px; color: #111827; line-height: 1.5; margin-bottom: 12px; }
+        div[data-testid="stVerticalBlockBorderWrapper"] { background: #FFFFFF; }
+        div[data-testid="stButton"] > button { border-radius: 10px; }
+        [data-testid="stSidebar"] .stDownloadButton button { height: 38px; }
+        [data-testid="stSidebar"] .stFileUploader { margin-bottom: 0; }
+        </style>
         """,
         unsafe_allow_html=True,
     )
-
-
-def render_day_number(day, is_selected):
-    if is_selected:
-        st.markdown(
-            f"""
-            <div style="
-                display:inline-block;
-                min-width:24px;
-                text-align:center;
-                padding:4px 6px;
-                border-radius:999px;
-                background:#111827;
-                color:#FFFFFF;
-                font-size:10px;
-                font-weight:800;
-                line-height:1;
-                margin-bottom:6px;
-            ">
-                {day.day}
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    else:
-        if st.button(str(day.day), key=f"day_btn_{day.isoformat()}"):
-            st.session_state["selected_day"] = day
-            st.rerun()
-
-
-def render_month_calendar(df, selected_date):
-    year = selected_date.year
-    month = selected_date.month
-    cal = calendar.Calendar(firstweekday=0)
-    weeks = cal.monthdatescalendar(year, month)
-
-    weekday_names = ["월", "화", "수", "목", "금", "토", "일"]
-    weekday_colors = ["#111827", "#111827", "#111827", "#111827", "#111827", "#2563EB", "#DC2626"]
-
-    header_cols = st.columns(7, gap="small")
-    for i, wd in enumerate(weekday_names):
-        with header_cols[i]:
-            st.markdown(f'<div class="calendar-header" style="color:{weekday_colors[i]};">{wd}</div>', unsafe_allow_html=True)
-
-    for week in weeks:
-        cols = st.columns(7, gap="small")
-        for i, day in enumerate(week):
-            daily = df[df.apply(lambda row: event_matches_day(row, day), axis=1)].sort_values(
-                ["importance_score", "benchmark_score", "sort_end"], ascending=[False, False, True]
-            )
-            in_month = day.month == month
-            bg = "#FFFFFF" if in_month else "#F3F4F6"
-
-            with cols[i]:
-                with st.container(border=True):
-                    st.markdown(
-                        f"""
-                        <div style="
-                            background:{bg};
-                            min-height:96px;
-                            margin:-1rem;
-                            padding:0.45rem;
-                            border-radius:0.75rem;
-                        ">
-                        """,
-                        unsafe_allow_html=True,
-                    )
-                    render_day_number(day, day == st.session_state["selected_day"])
-
-                    if not daily.empty:
-                        for _, row in daily.head(2).iterrows():
-                            render_event_badge(row)
-                        extra = len(daily) - 2
-                        if extra > 0:
-                            st.caption(f"+ {extra}건")
-                    else:
-                        st.markdown("<div style='height:0.15rem;'></div>", unsafe_allow_html=True)
-
-                    st.markdown("</div>", unsafe_allow_html=True)
-
-    legend = st.columns(6)
-    for idx, label in enumerate(EVENT_CATEGORIES):
-        with legend[idx]:
-            style = get_type_style(label)
-            st.markdown(
-                f"""
-                <div style="text-align:center; font-size:12px; color:#374151; margin-top:6px;">
-                    <span style="display:inline-block; width:9px; height:9px; border-radius:999px; background:{style['dot']}; margin-right:5px;"></span>
-                    {label}
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-
-def render_week_view(df, selected_date):
-    week_start = selected_date - timedelta(days=selected_date.weekday())
-    days = [week_start + timedelta(days=i) for i in range(7)]
-    cols = st.columns(7)
-    for idx, day in enumerate(days):
-        with cols[idx]:
-            st.markdown(f"**{day.strftime('%m.%d')}**")
-            if st.button("이 날짜 보기", key=f"week_{day.isoformat()}"):
-                st.session_state["selected_day"] = day
-                st.rerun()
-            daily = df[df.apply(lambda row: event_matches_day(row, day), axis=1)]
-            if daily.empty:
-                st.caption("일정 없음")
-            else:
-                for _, row in daily.iterrows():
-                    render_event_badge(row)
-
-
-def render_list_view(df):
-    if df.empty:
-        st.info("조건에 맞는 행사가 없습니다.")
-        return
-    for _, row in df.iterrows():
-        style = get_type_style(row["event_type"])
-        st.markdown(
-            f"""
-            <div class="panel-card" style="margin-bottom:10px;">
-                <div style="font-size:12px; font-weight:800; color:{style['text']}; margin-bottom:5px;">{row['event_type']}</div>
-                <div style="font-size:18px; font-weight:800; color:#111827;">{row['event_name']}</div>
-                <div style="font-size:13px; color:#6B7280; margin-top:4px;">{short_period(row['start_date'], row['end_date'])}</div>
-                <div style="font-size:13px; color:#374151; margin-top:8px;">{text_or_default(row['one_line_summary'])}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-
-def get_daily_events(df, selected_day):
-    return df[df.apply(lambda row: event_matches_day(row, selected_day), axis=1)].sort_values(
-        ["importance_score", "benchmark_score", "sort_end"], ascending=[False, False, True]
-    )
-
-
-def render_day_events_center(df, selected_day):
-    daily = get_daily_events(df, selected_day)
-    st.markdown("### 선택 날짜 일정")
-    st.caption(f"{selected_day.strftime('%Y.%m.%d')} 기준")
-
-    if daily.empty:
-        st.info("선택한 날짜에 진행 중인 일정이 없습니다.")
-        return daily
-
-    cols = st.columns(2)
-    for idx, (_, row) in enumerate(daily.iterrows()):
-        with cols[idx % 2]:
-            style = get_type_style(row["event_type"])
-            st.markdown(
-                f"""
-                <div class="panel-card" style="margin-bottom:10px;">
-                    <div style="display:inline-block; background:{style['bg']}; color:{style['text']};
-                        padding:5px 10px; border-radius:999px; font-size:12px; font-weight:800; margin-bottom:10px;">
-                        {row['event_type']}
-                    </div>
-                    <div style="font-size:18px; font-weight:800; color:#111827; margin-bottom:4px;">{row['event_name']}</div>
-                    <div style="font-size:13px; color:#6B7280; margin-bottom:6px;">{short_period(row['start_date'], row['end_date'])}</div>
-                    <div style="font-size:13px; color:#374151; line-height:1.55;">{text_or_default(row['one_line_summary'])}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-    return daily
-
-
-def render_detail_field(label, value):
-    st.markdown(f'<div class="detail-label">{label}</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="detail-value">{text_or_default(value)}</div>', unsafe_allow_html=True)
-
-
-def render_right_panel(filtered_df, selected_day):
-    st.markdown("### 상세 이벤트")
-
-    daily = get_daily_events(filtered_df, selected_day)
-    if daily.empty:
-        st.info("선택 날짜에 표시할 상세 이벤트가 없습니다.")
-        return
-
-    options = {f"[{row['event_type']}] {row['event_name']}": idx for idx, row in daily.iterrows()}
-    selected_label = st.selectbox("상세 이벤트 선택", list(options.keys()), label_visibility="collapsed")
-    row = daily.loc[options[selected_label]]
-    style = get_type_style(row["event_type"])
-
-    with st.container(border=True):
-        st.markdown(
-            f"""
-            <div style="display:inline-block; background:{style['bg']}; color:{style['text']};
-                padding:6px 10px; border-radius:999px; font-size:12px; font-weight:800; margin-bottom:10px;">
-                {row['event_type']}
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        st.markdown(f"## {row['event_name']}")
-        st.write(row["venue_name"])
-        st.caption(format_period(row["start_date"], row["end_date"]))
-        st.caption(f"📍 {text_or_default(row['address'])}")
-
-        st.markdown("---")
-        st.markdown("#### 핵심 요약")
-        st.write(text_or_default(row["ai_summary"]))
-
-        st.markdown("---")
-        st.markdown("#### 상세 정보")
-        render_detail_field("이벤트 성격", row["event_type"])
-        render_detail_field("타겟", row["target_estimate"])
-        render_detail_field("주요 콘텐츠", row["main_content"])
-        render_detail_field("주최/브랜드", row["host_brand"])
-
-        st.markdown("---")
-        st.markdown("#### AI 인사이트")
-        st.write(
-            f"최근 {row['event_type']} 유형의 증가와 체험형 콘텐츠 선호가 함께 나타납니다. "
-            "롯데백화점 행사 기획에 바로 참고할 수 있는 레퍼런스입니다."
-        )
-
-        st.markdown("---")
-        st.markdown("#### 롯데 적용 아이디어")
-        st.write(f"✓ {text_or_default(row['lotte_idea'])}")
-
-
-def render_bottom_cards(df, insights):
-    total_count = len(df)
-    exhibition_count = (df["event_type"] == "미술 전시").sum()
-    popup_count = (df["event_type"] == "팝업").sum()
-    municipal_count = (df["event_type"] == "지자체 행사").sum()
-    competitor_count = (df["event_type"] == "경쟁사 이벤트").sum()
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.markdown(
-            f"""
-            <div class="mini-card">
-                <div style="font-size:15px; font-weight:800; margin-bottom:16px;">이번 달 한눈에 보기</div>
-                <div style="display:flex; gap:16px; align-items:end; flex-wrap:wrap;">
-                    <div><div style="font-size:40px; font-weight:800;">{total_count}</div><div class="sub-muted">전체 이벤트</div></div>
-                    <div><div style="font-size:24px; font-weight:800; color:#8B5CF6;">{exhibition_count}</div><div class="sub-muted">미술 전시</div></div>
-                    <div><div style="font-size:24px; font-weight:800; color:#F59E0B;">{popup_count}</div><div class="sub-muted">팝업</div></div>
-                    <div><div style="font-size:24px; font-weight:800; color:#4CAF50;">{municipal_count}</div><div class="sub-muted">지자체 행사</div></div>
-                    <div><div style="font-size:24px; font-weight:800; color:#3B82F6;">{competitor_count}</div><div class="sub-muted">경쟁사</div></div>
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with c2:
-        lines = "".join([f"<li style='margin-bottom:8px;'>{line}</li>" for line in insights["summary_lines"]])
-        st.markdown(
-            f"""
-            <div class="mini-card">
-                <div style="font-size:15px; font-weight:800; margin-bottom:16px;">AI 트렌드 요약</div>
-                <ul style="padding-left:18px; margin:0; color:#374151; font-size:14px;">
-                    {lines}
-                </ul>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with c3:
-        pills = "".join([f"<span class='pill'># {kw}</span>" for kw in insights["keywords"]])
-        st.markdown(
-            f"""
-            <div class="mini-card">
-                <div style="font-size:15px; font-weight:800; margin-bottom:16px;">주목할 키워드</div>
-                <div>{pills}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
 
 
 def main():
